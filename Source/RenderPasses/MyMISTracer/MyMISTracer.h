@@ -29,6 +29,7 @@
 #include "Falcor.h"
 #include "RenderGraph/RenderPass.h"
 #include "Utils/Sampling/SampleGenerator.h"
+#include "Rendering/Lights/EmissivePowerSampler.h"
 
 using namespace Falcor;
 
@@ -80,6 +81,9 @@ private:
     /// Frame count since scene was loaded.
     uint mFrameCount = 0;
     bool mOptionsChanged = false;
+
+    // Emissive light Sampler.
+    std::unique_ptr<EmissiveLightSampler> mpEmissiveSampler;
 
     // Ray tracing program.
     struct

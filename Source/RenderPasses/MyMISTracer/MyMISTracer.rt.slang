@@ -19,7 +19,12 @@ import Scene.Intersection;
 import Utils.Math.MathHelpers;
 import Utils.Geometry.GeometryHelpers;
 import Utils.Sampling.SampleGenerator;
+import Utils.Sampling.SampleGeneratorInterface;
+import Utils.Color.ColorHelpers;
 import Rendering.Lights.LightHelpers;
+import Rendering.Lights.EmissiveLightSampler;
+import Rendering.Lights.EmissiveLightSamplerInterface;
+
 
 cbuffer CB
 {
@@ -200,6 +205,41 @@ void traceScatterRay(inout ScatterRayData rayData)
     TraceRay(gScene.rtAccel, rayFlags, 0xff /* instanceInclusionMask */, 0 /* hitIdx */, rayTypeCount, 0 /* missIdx */, ray, rayData);
 }
 
+float3 evalDirectAnalytic(const ShadingData sd, const IMaterialInstance mi, inout SampleGenerator sg)
+{
+    const uint lightCount = gScene.getLightCount();
+    if (lightCount == 0)
+        return float3(0.f);
+
+    // Pick one of the analytic light sources randomly with equal probability.
+    const uint lightIndex = min(uint(sampleNext1D(sg) * lightCount), lightCount - 1);
+    float invPdf = lightCount; // Light selection pdf = 1.0 / lightCount.
+
+    // Sample local light source.
+    AnalyticLightSample ls;
+    if (!sampleLight(sd.posW, gScene.getLight(lightIndex), sg, ls))
+        return float3(0.f);
+
+    // Reject sample if not in the hemisphere of a BSDF lobe.
+    const uint lobeTypes = mi.getLobeTypes(sd);
+    const bool hasReflection = lobeTypes & uint(LobeType::Reflection);
+    const bool hasTransmission = lobeTypes & uint(LobeType::Transmission);
+    float NdotL = dot(sd.getOrientedFaceNormal(), ls.dir);
+    if ((NdotL <= kMinCosTheta && !hasTransmission) || (NdotL >= -kMinCosTheta && !hasReflection))
+        return float3(0.f);
+
+    // Get origin with offset applied in direction of the geometry normal to avoid self-intersection.
+    const float3 origin = computeRayOrigin(sd.posW, dot(sd.faceN, ls.dir) >= 0.f ? sd.faceN : -sd.faceN);
+
+    // Test visibility by tracing a shadow ray.
+    bool V = traceShadowRay(origin, ls.dir, ls.distance);
+    if (!V)
+        return float3(0.f);
+
+    // Evaluate contribution.
+    return mi.eval(sd, ls.dir, sg) * ls.Li * invPdf;
+}
+
 /**
  * Evaluates the direct illumination from analytic lights.
  * This function samples Falcor's light list uniformly with one shadow ray.
@@ -209,67 +249,102 @@ void traceScatterRay(inout ScatterRayData rayData)
  * @return Outgoing radiance in view direction.
  */
 struct Reservoir {
-    AnalyticLightSample ls;
     float3 ls_res;
 
     float sum_weight;
     float current_weight;
 
-    [mutating] void update(const AnalyticLightSample x, const float weight, const float3 res, inout SampleGenerator sg) {
+    [mutating] void update(const float weight, const float3 res, inout SampleGenerator sg) {
         this.sum_weight += weight;
         if (sampleNext1D(sg) < weight / sum_weight) {
-            this.ls = x;
             this.ls_res = res;
             this.current_weight = weight;
         }
     }
 };
 
-float3 evalDirectAnalytic(const ShadingData sd, const IMaterialInstance mi, inout SampleGenerator sg)
+// void evalDirectMISAnalytic(const ShadingData sd, const IMaterialInstance mi, inout SampleGenerator sg, inout Reservoir r) {
+//     const uint lightCount = gScene.getLightCount();
+//     if (lightCount == 0)
+//         return;
+    
+//     float invPdf = lightCount; // Light selection pdf = 1.0 / lightCount.
+
+//     // Pick one of the analytic light sources randomly with equal probability.
+//     const uint lightIndex = min(uint(sampleNext1D(sg) * lightCount), lightCount - 1);
+
+//     // Sample local light source.
+//     AnalyticLightSample ls;
+//     if (!sampleLight(sd.posW, gScene.getLight(lightIndex), sg, ls))
+//         return;
+
+//     // Reject sample if not in the hemisphere of a BSDF lobe.
+//     const uint lobeTypes = mi.getLobeTypes(sd);
+//     const bool hasReflection = lobeTypes & uint(LobeType::Reflection);
+//     const bool hasTransmission = lobeTypes & uint(LobeType::Transmission);
+//     float NdotL = dot(sd.getOrientedFaceNormal(), ls.dir);
+//     if ((NdotL <= kMinCosTheta && !hasTransmission) || (NdotL >= -kMinCosTheta && !hasReflection))
+//         return;
+
+//     // Get origin with offset applied in direction of the geometry normal to avoid self-intersection.
+//     const float3 origin = computeRayOrigin(sd.posW, dot(sd.faceN, ls.dir) >= 0.f ? sd.faceN : -sd.faceN);
+
+//     // Test visibility by tracing a shadow ray.
+//     bool V = traceShadowRay(origin, ls.dir, ls.distance);
+//     if (!V)
+//         return;
+
+//     // Evaluate contribution.
+//     // return mi.eval(sd, ls.dir, sg) * ls.Li * invPdf;
+//     const float3 res = mi.eval(sd, ls.dir, sg) * ls.Li * invPdf;
+//     const float weight = luminance(res);
+//     r.update(weight, res, sg);
+// }
+
+EmissiveLightSampler emissiveSampler;
+
+// void evalDirectMISEmissive(const ShadingData sd, const IMaterialInstance mi, inout SampleGenerator sg, inout Reservoir r) {
+//     TriangleLightSample ls;
+//     if (!emissiveSampler.sampleLight(sd.posW, sd.faceN, true, sg, ls))
+//         return;
+
+//     // Reject sample if not in the hemisphere of a BSDF lobe.
+//     const uint lobeTypes = mi.getLobeTypes(sd);
+//     const bool hasReflection = lobeTypes & uint(LobeType::Reflection);
+//     const bool hasTransmission = lobeTypes & uint(LobeType::Transmission);
+//     float NdotL = dot(sd.getOrientedFaceNormal(), ls.dir);
+//     if ((NdotL <= kMinCosTheta && !hasTransmission) || (NdotL >= -kMinCosTheta && !hasReflection))
+//         return;
+
+//     // Get origin with offset applied in direction of the geometry normal to avoid self-intersection.
+//     const float3 origin = computeRayOrigin(sd.posW, dot(sd.faceN, ls.dir) >= 0.f ? sd.faceN : -sd.faceN);
+
+//     // Test visibility by tracing a shadow ray.
+//     bool V = traceShadowRay(origin, ls.dir, ls.distance);
+//     if (!V)
+//         return;
+
+//     // Evaluate contribution.
+//     // return mi.eval(sd, ls.dir, sg) * ls.Li * invPdf;
+//     const float3 res = mi.eval(sd, ls.dir, sg) * ls.Le / ls.pdf;
+//     const float weight = luminance(res);
+//     r.update(weight, res, sg);
+// }
+
+float3 evalDirectMIS(const ShadingData sd, const IMaterialInstance mi, inout SampleGenerator sg)
 {
-    const uint lightCount = gScene.getLightCount();
-    if (lightCount == 0)
-        return float3(0.f);
-    Reservoir r;
-    r.sum_weight = 0;
-    float invPdf = lightCount; // Light selection pdf = 1.0 / lightCount.
-
-    for (int i = 0; i < kMISSamples; i++) {
-        // Pick one of the analytic light sources randomly with equal probability.
-        const uint lightIndex = min(uint(sampleNext1D(sg) * lightCount), lightCount - 1);        
-
-        // Sample local light source.
-        AnalyticLightSample ls;
-        if (!sampleLight(sd.posW, gScene.getLight(lightIndex), sg, ls))
-            continue;
-
-        // Reject sample if not in the hemisphere of a BSDF lobe.
-        const uint lobeTypes = mi.getLobeTypes(sd);
-        const bool hasReflection = lobeTypes & uint(LobeType::Reflection);
-        const bool hasTransmission = lobeTypes & uint(LobeType::Transmission);
-        float NdotL = dot(sd.getOrientedFaceNormal(), ls.dir);
-        if ((NdotL <= kMinCosTheta && !hasTransmission) || (NdotL >= -kMinCosTheta && !hasReflection))
-            continue;
-
-        // Get origin with offset applied in direction of the geometry normal to avoid self-intersection.
-        const float3 origin = computeRayOrigin(sd.posW, dot(sd.faceN, ls.dir) >= 0.f ? sd.faceN : -sd.faceN);
-
-        // Test visibility by tracing a shadow ray.
-        bool V = traceShadowRay(origin, ls.dir, ls.distance);
-        if (!V)
-            continue;
-
-        // Evaluate contribution.
-        // return mi.eval(sd, ls.dir, sg) * ls.Li * invPdf;
-        const float3 res = mi.eval(sd, ls.dir, sg) * ls.Li * invPdf;
-        const float weight = res.x + res.y + res.z;
-        r.update(ls, weight, res, sg);
-    }
-
-    if(r.sum_weight < 1e-6)
-        return float3(0.f);
-
-    return r.sum_weight * r.ls_res / kMISSamples;
+    // Reservoir r;
+    // r.sum_weight = 0;
+    // for (int i = 0; i < kMISSamples; i++) {
+    //     if (sampleNext1D(sg) < 0.5f)
+    //         evalDirectMISAnalytic(sd, mi, sg, r);
+    //     else
+    //         evalDirectMISEmissive(sd, mi, sg, r);
+    // }
+    // if (r.sum_weight < 1e-6)
+    //     return float3(0.f);
+    // return r.sum_weight * r.ls_res * 2 / kMISSamples;
+    return float3(0.f);
 }
 
 /**
@@ -320,7 +395,7 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     let mi = gScene.materials.getMaterialInstance(sd, lod);
 
     // Add emitted light.
-    if (kUseEmissiveLights && (kComputeDirect || rayData.pathLength > 0))
+    if (kUseEmissiveLights && rayData.pathLength > 1)
     {
         rayData.radiance += rayData.thp * mi.getProperties(sd).emission;
     }
@@ -345,7 +420,7 @@ void handleHit(const HitInfo hit, inout ScatterRayData rayData)
     }
 
     // Add contribution of direct light from analytic lights.
-    if (kUseAnalyticLights)
+    if (kUseAnalyticLights && rayData.pathLength > 0)
     {
         float3 Lr = evalDirectAnalytic(sd, mi, rayData.sg);
         rayData.radiance += rayData.thp * Lr;
@@ -422,12 +497,12 @@ float3 tracePath(const uint2 pixel, const uint2 frameDim)
             // Always output directly emitted light, independent of whether emissive materials are treated as light sources or not.
             outColor += mi.getProperties(sd).emission;
 
-            // Add contribution of direct light from analytic lights.
-            // Light probe and mesh lights are handled by the scatter ray hit/miss shaders.
-            outColor += kUseAnalyticLights ? evalDirectAnalytic(sd, mi, sg) : float3(0.f);
+            // Add contribution of direct light from ALL lights.
+            // Light probe and mesh lights are now NOT handled by the scatter ray hit/miss shaders.
+            // Compute DI using MIS
+            outColor += kUseAnalyticLights ? evalDirectMIS(sd, mi, sg) : float3(0.f);
         }
 
-        // Prepare ray payload.
         ScatterRayData rayData = ScatterRayData(sg);
 
         // Generate scatter ray.
@@ -465,7 +540,7 @@ void scatterMiss(inout ScatterRayData rayData)
     rayData.terminated = true;
 
     // Add contribution from distant light (env map) in this direction.
-    if (kUseEnvLight && (kComputeDirect || rayData.pathLength > 0))
+    if (kUseEnvLight && rayData.pathLength > 1)
     {
         float3 Le = gScene.envMap.eval(WorldRayDirection());
         rayData.radiance += rayData.thp * Le;

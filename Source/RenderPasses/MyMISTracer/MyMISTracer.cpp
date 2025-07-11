@@ -1,6 +1,7 @@
 #include "MyMISTracer.h"
 #include "RenderGraph/RenderPassHelpers.h"
 #include "RenderGraph/RenderPassStandardFlags.h"
+#include "Rendering/Lights/EmissiveUniformSampler.h"
 
 extern "C" FALCOR_API_EXPORT void registerPlugin(Falcor::PluginRegistry& registry)
 {
@@ -161,6 +162,11 @@ void MyMISTracer::execute(RenderContext* pRenderContext, const RenderData& rende
         bind(channel);
     for (auto channel : kOutputChannels)
         bind(channel);
+
+    if(!mpEmissiveSampler && mpScene->useEmissiveLights()){
+        mpEmissiveSampler = std::make_unique<EmissiveUniformSampler>(pRenderContext, mpScene->getILightCollection(pRenderContext));
+        mpEmissiveSampler->bindShaderData(var["emissiveSampler"]);
+    }
 
     // Get dimensions of ray dispatch.
     const uint2 targetDim = renderData.getDefaultTextureDims();
