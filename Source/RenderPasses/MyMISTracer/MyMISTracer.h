@@ -84,6 +84,7 @@ private:
 
     // Emissive light Sampler.
     std::unique_ptr<EmissiveLightSampler> mpEmissiveSampler;
+    ref<ParameterBlock> mpEmissiveBlock;
 
     // Ray tracing program.
     struct

@@ -139,6 +139,8 @@ void MyMISTracer::execute(RenderContext* pRenderContext, const RenderData& rende
     mTracer.pProgram->addDefines(getValidResourceDefines(kInputChannels, renderData));
     mTracer.pProgram->addDefines(getValidResourceDefines(kOutputChannels, renderData));
 
+    mpEmissiveSampler = std::make_unique<EmissiveUniformSampler>(pRenderContext, mpScene->getILightCollection(pRenderContext));
+
     // Prepare program vars. This may trigger shader compilation.
     // The program should have all necessary defines set at this point.
     if (!mTracer.pVars)
@@ -162,11 +164,6 @@ void MyMISTracer::execute(RenderContext* pRenderContext, const RenderData& rende
         bind(channel);
     for (auto channel : kOutputChannels)
         bind(channel);
-
-    if(!mpEmissiveSampler && mpScene->useEmissiveLights()){
-        mpEmissiveSampler = std::make_unique<EmissiveUniformSampler>(pRenderContext, mpScene->getILightCollection(pRenderContext));
-        mpEmissiveSampler->bindShaderData(var["emissiveSampler"]);
-    }
 
     // Get dimensions of ray dispatch.
     const uint2 targetDim = renderData.getDefaultTextureDims();
@@ -290,6 +287,7 @@ void MyMISTracer::prepareVars()
 
     // Configure program.
     mTracer.pProgram->addDefines(mpSampleGenerator->getDefines());
+    mTracer.pProgram->addDefines(mpEmissiveSampler->getDefines());
     mTracer.pProgram->setTypeConformances(mpScene->getTypeConformances());
 
     // Create program variables for the current program.
@@ -299,4 +297,9 @@ void MyMISTracer::prepareVars()
     // Bind utility classes into shared data.
     auto var = mTracer.pVars->getRootVar();
     mpSampleGenerator->bindShaderData(var);
+    auto pReflection = mTracer.pProgram->getReflector();
+    auto pBlockReflection = pReflection->getParameterBlock("gEmissive");
+    mpEmissiveBlock  = ParameterBlock::create(mpDevice, pBlockReflection);
+    auto emissiveVar =  mpEmissiveBlock->getRootVar();
+    mpEmissiveSampler->bindShaderData(emissiveVar["emissiveSampler"]);
 }
