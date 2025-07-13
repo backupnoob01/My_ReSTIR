@@ -25,7 +25,6 @@ import Rendering.Lights.LightHelpers;
 import Rendering.Lights.EmissiveLightSampler;
 import Rendering.Lights.EmissiveLightSamplerInterface;
 
-
 cbuffer CB
 {
     uint gFrameCount;    // Frame count since scene was loaded.
@@ -38,13 +37,14 @@ Texture2D<float4> gViewW; // Optional
 
 // Outputs
 RWTexture2D<float4> gOutputColor;
+RWTexture2D<float4> gReservoirs;
 
 // Static configuration based on defines set from the host.
 #define is_valid(name) (is_valid_##name != 0)
-static const uint kMaxBounces  = MAX_BOUNCES;
-static const uint kMISSamples  = MIS_NEE_SAMPLES + MIS_BSDF_SAMPLES;
-static const uint kNEESamples  = MIS_NEE_SAMPLES;
-static const uint kBSDFSamples = MIS_BSDF_SAMPLES;
+static const uint kMaxBounces    = MAX_BOUNCES;
+static const uint kMISSamples    = MIS_NEE_SAMPLES + MIS_BSDF_SAMPLES;
+static const uint kNEESamples    = MIS_NEE_SAMPLES;
+static const uint kBSDFSamples   = MIS_BSDF_SAMPLES;
 static const bool kComputeDirect = COMPUTE_DIRECT;
 static const bool kUseImportanceSampling = USE_IMPORTANCE_SAMPLING;
 static const bool kUseAnalyticLights = USE_ANALYTIC_LIGHTS;
@@ -268,7 +268,7 @@ struct Reservoir {
     float sum_weight;
 
     [mutating] void update(const float weight, const float3 res, inout SampleGenerator sg) {
-        if (weight < 1e-4)
+        if (weight == 0.f)
             return;
         this.sum_weight += weight;
         if (sampleNext1D(sg) < weight / sum_weight) {
@@ -278,6 +278,11 @@ struct Reservoir {
         // this.current_res += weight * res / sum_weight;
     }
 };
+
+void exportReservoir(const Reservoir r, const uint2 pixel) {
+    gReservoirs[pixel].xyz = r.current_res;
+    gReservoirs[pixel].w = r.sum_weight;
+}
 
 void evalDirectMISAnalytic(const ShadingData sd, const IMaterialInstance mi, inout SampleGenerator sg, inout Reservoir r) {
     const uint lightCount = gScene.getLightCount();
@@ -311,7 +316,6 @@ void evalDirectMISAnalytic(const ShadingData sd, const IMaterialInstance mi, ino
         return;
 
     // Evaluate contribution.
-    // return mi.eval(sd, ls.dir, sg) * ls.Li * invPdf;
     const float3 res = mi.eval(sd, ls.dir, sg) * ls.Li * invPdf;
     const float weight = luminance(res);
     r.update(weight, res, sg);
@@ -327,22 +331,25 @@ void evalDirectMISEmissiveNEE(const ShadingData sd, const IMaterialInstance mi, 
     TriangleLightSample ls;
     if (!gEmissive.emissiveSampler.sampleLight(sd.posW, sd.faceN, true, sg, ls))
         return;
-    
-    // Reject sample if not in the hemisphere of a BSDF lobe.
-    // THIS IS WRONG!!!
-    // const uint lobeTypes = mi.getLobeTypes(sd);
-    // const bool hasReflection = lobeTypes & uint(LobeType::Reflection);
-    // const bool hasTransmission = lobeTypes & uint(LobeType::Transmission);
-    // float NdotL = dot(sd.getOrientedFaceNormal(), ls.dir);
-    // if ((NdotL <= kMinCosTheta && !hasTransmission) || (NdotL >= -kMinCosTheta && !hasReflection))
-    //     return;
 
     // Get origin with offset applied in direction of the geometry normal to avoid self-intersection.
-    const float3 origin = computeRayOrigin(sd.posW, dot(sd.faceN, ls.dir) >= 0.f ? sd.faceN : -sd.faceN);
+    RayDesc ray;
+    DirectRayData rayData;
+    ray.Origin = computeRayOrigin(sd.posW, dot(sd.faceN, ls.dir) >= 0.f ? sd.faceN : -sd.faceN);
+    rayData.origin = ray.Origin;
+    ray.Direction = ls.dir;
+    rayData.direction = ray.Direction;
+    ray.TMin = 0.f;
+    ray.TMax = kRayTMax;
 
-    // Test visibility by tracing a shadow ray.
-    bool V = traceShadowRay(origin, ls.dir, ls.distance - 0.15);
-    if (!V) {
+    uint rayFlags = 0; // TODO: Set cull mode from the app
+    TraceRay(gScene.rtAccel, rayFlags, 0xff /* instanceInclusionMask */, 2 /* hitIdx */, rayTypeCount, 2 /* missIdx */, ray, rayData);
+
+    if (rayData.visible) {
+        return;
+    }
+
+    if (gScene.lightCollection.getTriangleIndex(rayData.instanceID, rayData.triangleID) != ls.triangleIndex) {
         return;
     }
 
@@ -351,7 +358,7 @@ void evalDirectMISEmissiveNEE(const ShadingData sd, const IMaterialInstance mi, 
 
     const float3 res = mi.eval(sd, ls.dir, sg) * ls.Le;
     const float pdfNEE = gEmissive.emissiveSampler.evalPdf(sd.posW, sd.faceN, true, hit);
-    if (pdfNEE < 1e-4) {
+    if (pdfNEE == 0.f) {
         return;
     }
     const float pdfBSDF = mi.evalPdf(sd, ls.dir, kUseImportanceSampling);
@@ -389,7 +396,7 @@ void evalDirectMISEmissiveBSDF(const ShadingData sd, const IMaterialInstance mi,
     const float pdfBSDF = bsdfSample.pdf;
 
     if (!isDelta) {
-        if (pdfBSDF < 1e-4) {
+        if (pdfBSDF == 0.f) {
             return;
         }
         const float3 res = rayData.radiance * bsdfSample.weight * pdfBSDF;
@@ -404,12 +411,12 @@ void evalDirectMISEmissiveBSDF(const ShadingData sd, const IMaterialInstance mi,
     }
 }
 
-float3 evalDirectMIS(const ShadingData sd, const IMaterialInstance mi, inout SampleGenerator sg)
+void evalDirectMIS(const ShadingData sd, const IMaterialInstance mi, inout SampleGenerator sg, const uint2 pixel)
 {
     Reservoir r;
     r.sum_weight  = 0.f;
     r.current_res = float3(0.f, 0.f, 0.f);
-    float pNEE = 0.5f;
+
     // TODO: no eval analytic for now
     for (int i = 0; i < kNEESamples; i++) {        
         evalDirectMISEmissiveNEE (sd, mi, sg, r);
@@ -417,10 +424,19 @@ float3 evalDirectMIS(const ShadingData sd, const IMaterialInstance mi, inout Sam
     for (int i = 0; i < kBSDFSamples; i++) {
         evalDirectMISEmissiveBSDF(sd, mi, sg, r);
     }
-    if (luminance(r.current_res) < 1e-6) // for not to div 0
-        return float3(0.f);
-    float3 ans = r.sum_weight * r.current_res / luminance(r.current_res); //
-    return ans;
+    if (luminance(r.current_res) == 0.f) {
+        r.sum_weight = 0.f;
+        r.current_res = float3(0.f, 0.f, 0.f);
+    } // for not to div 0
+    else
+        r.sum_weight /= luminance(r.current_res);
+    exportReservoir(r, pixel);
+    // importReservoir(pixel, r);
+
+    // if (luminance(r.current_res) < 1e-6) // for not to div 0
+    //     return float3(0.f);
+    // float3 ans = r.sum_weight * r.current_res / luminance(r.current_res); //
+    // return ans;
 }
 
 /**
@@ -447,10 +463,8 @@ bool generateScatterRay(const ShadingData sd, const IMaterialInstance mi, bool i
         rayData.thp *= bsdfSample.weight;
         return any(rayData.thp > 0.f);
     }
-
     return false;
 }
-
 /**
  * Process a hit.
  * Loads the shading data, samples analytic lights and samples a new scatter ray.
@@ -596,7 +610,8 @@ float3 tracePath(const uint2 pixel, const uint2 frameDim)
             // Add contribution of direct light from ALL lights.
             // Light probe and mesh lights are now NOT handled by the scatter ray hit/miss shaders.
             // Compute DI using MIS
-            outColor += evalDirectMIS(sd, mi, sg);
+            // outColor += evalDirectMIS(sd, mi, sg, pixel);
+            evalDirectMIS(sd, mi, sg, pixel);
         }
 
         ScatterRayData rayData = ScatterRayData(sg);
@@ -620,6 +635,10 @@ float3 tracePath(const uint2 pixel, const uint2 frameDim)
     {
         // Background pixel.
         outColor = kUseEnvBackground ? gScene.envMap.eval(primaryRayDir) : kDefaultBackgroundColor;
+        Reservoir r;
+        r.current_res = float3(0.f);
+        r.sum_weight = 0.f;
+        exportReservoir(r, pixel);
     }
 
     return outColor;
@@ -802,6 +821,5 @@ void rayGen()
     uint2 frameDim = DispatchRaysDimensions().xy;
 
     float3 color = tracePath(pixel, frameDim);
-
     gOutputColor[pixel] = float4(color, 1.f);
 }

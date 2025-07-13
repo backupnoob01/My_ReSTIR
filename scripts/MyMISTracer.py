@@ -1,12 +1,12 @@
 from falcor import *
 
 def render_graph_MyPathTracer():
-    g = RenderGraph("MyPathTracer")
+    g = RenderGraph("MyMISTracer")
     AccumulatePass = createPass("AccumulatePass", {'enabled': True, 'precisionMode': 'Single'})
     g.addPass(AccumulatePass, "AccumulatePass")
     ToneMapper = createPass("ToneMapper", {'autoExposure': False, 'exposureCompensation': 0.0})
     g.addPass(ToneMapper, "ToneMapper")
-    MyPathTracer = createPass("MyMISTracer", {'maxBounces': 3})
+    MyPathTracer = createPass("MyMISTracer")
     g.addPass(MyPathTracer, "MyPathTracer")
     VBufferRT = createPass("VBufferRT", {'samplePattern': 'Stratified', 'sampleCount': 16})
     g.addPass(VBufferRT, "VBufferRT")

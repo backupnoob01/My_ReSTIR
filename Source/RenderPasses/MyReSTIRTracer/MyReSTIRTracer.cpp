@@ -1,16 +1,16 @@
-#include "MyMISTracer.h"
+#include "MyReSTIRTracer.h"
 #include "RenderGraph/RenderPassHelpers.h"
 #include "RenderGraph/RenderPassStandardFlags.h"
 #include "Rendering/Lights/EmissiveUniformSampler.h"
 
 extern "C" FALCOR_API_EXPORT void registerPlugin(Falcor::PluginRegistry& registry)
 {
-    registry.registerClass<RenderPass, MyMISTracer>();
+    registry.registerClass<RenderPass, MyReSTIRTracer>();
 }
 
 namespace
 {
-const char kShaderFile[] = "RenderPasses/MyMISTracer/MyMISTracer.rt.slang";
+const char kShaderFile[] = "RenderPasses/MyReSTIRTracer/MyReSTIRTracer.rt.slang";
 
 // Ray tracing settings that affect the traversal stack size.
 // These should be set as small as possible.
@@ -28,7 +28,8 @@ const ChannelList kInputChannels = {
 
 const ChannelList kOutputChannels = {
     // clang-format off
-    { "color",          "gOutputColor", "Output color (sum of direct and indirect)", false, ResourceFormat::RGBA32Float },
+    { "color",              "gOutputColor", "Output color (sum of direct and indirect)", false, ResourceFormat::RGBA32Float },
+    { "reservoirs",         "gReservoirs",  "ReSTIR reservoirs", false, ResourceFormat::RGBA32Float },
     // clang-format on
 };
 
@@ -37,7 +38,7 @@ const char kComputeDirect[] = "computeDirect";
 const char kUseImportanceSampling[] = "useImportanceSampling";
 } // namespace
 
-MyMISTracer::MyMISTracer(ref<Device> pDevice, const Properties& props) : RenderPass(pDevice)
+MyReSTIRTracer::MyReSTIRTracer(ref<Device> pDevice, const Properties& props) : RenderPass(pDevice)
 {
     parseProperties(props);
 
@@ -46,7 +47,7 @@ MyMISTracer::MyMISTracer(ref<Device> pDevice, const Properties& props) : RenderP
     FALCOR_ASSERT(mpSampleGenerator);
 }
 
-void MyMISTracer::parseProperties(const Properties& props)
+void MyReSTIRTracer::parseProperties(const Properties& props)
 {
     for (const auto& [key, value] : props)
     {
@@ -57,11 +58,11 @@ void MyMISTracer::parseProperties(const Properties& props)
         else if (key == kUseImportanceSampling)
             mUseImportanceSampling = value;
         else
-            logWarning("Unknown property '{}' in MyMISTracer properties.", key);
+            logWarning("Unknown property '{}' in MyReSTIRTracer properties.", key);
     }
 }
 
-Properties MyMISTracer::getProperties() const
+Properties MyReSTIRTracer::getProperties() const
 {
     Properties props;
     props[kMaxBounces] = mMaxBounces;
@@ -70,7 +71,7 @@ Properties MyMISTracer::getProperties() const
     return props;
 }
 
-RenderPassReflection MyMISTracer::reflect(const CompileData& compileData)
+RenderPassReflection MyReSTIRTracer::reflect(const CompileData& compileData)
 {
     RenderPassReflection reflector;
 
@@ -81,7 +82,7 @@ RenderPassReflection MyMISTracer::reflect(const CompileData& compileData)
     return reflector;
 }
 
-void MyMISTracer::execute(RenderContext* pRenderContext, const RenderData& renderData)
+void MyReSTIRTracer::execute(RenderContext* pRenderContext, const RenderData& renderData)
 {
     // Update refresh flag if options that affect the output have changed.
     auto& dict = renderData.getDictionary();
@@ -139,6 +140,7 @@ void MyMISTracer::execute(RenderContext* pRenderContext, const RenderData& rende
     // TODO: This should be moved to a more general mechanism using Slang.
     mTracer.pProgram->addDefines(getValidResourceDefines(kInputChannels, renderData));
     mTracer.pProgram->addDefines(getValidResourceDefines(kOutputChannels, renderData));
+    // TODO: mTracer.pProgram->addDefines(getValidResourceDefines(kOutputChannels, renderData));
 
     mpEmissiveSampler = std::make_unique<EmissiveUniformSampler>(pRenderContext, mpScene->getILightCollection(pRenderContext));
 
@@ -170,13 +172,20 @@ void MyMISTracer::execute(RenderContext* pRenderContext, const RenderData& rende
     const uint2 targetDim = renderData.getDefaultTextureDims();
     FALCOR_ASSERT(targetDim.x > 0 && targetDim.y > 0);
 
+    if (!mpReservoirs || mpReservoirs->getWidth() != targetDim.x || mpReservoirs->getHeight() != targetDim.y){
+        mpReservoirs = mpDevice->createTexture2D(targetDim.x, targetDim.y, ResourceFormat::RGBA32Float, 1, 1, nullptr, ResourceBindFlags::ShaderResource | ResourceBindFlags::UnorderedAccess | ResourceBindFlags::RenderTarget);
+        var["gReservoirs"] = mpReservoirs;
+        pRenderContext->clearUAV(mpReservoirs->getUAV().get(), float4(0.f));
+        // pRenderContext->clearTexture(mpReservoirs.get(), Falcor::float4(0, 0, 0, 0));
+    }
+
     // Spawn the rays.
     mpScene->raytrace(pRenderContext, mTracer.pProgram.get(), mTracer.pVars, uint3(targetDim, 1));
 
     mFrameCount++;
 }
 
-void MyMISTracer::renderUI(Gui::Widgets& widget)
+void MyReSTIRTracer::renderUI(Gui::Widgets& widget)
 {
     bool dirty = false;
 
@@ -203,7 +212,7 @@ void MyMISTracer::renderUI(Gui::Widgets& widget)
     }
 }
 
-void MyMISTracer::setScene(RenderContext* pRenderContext, const ref<Scene>& pScene)
+void MyReSTIRTracer::setScene(RenderContext* pRenderContext, const ref<Scene>& pScene)
 {
     // Clear data for previous scene.
     // After changing scene, the raytracing program should to be recreated.
@@ -219,7 +228,7 @@ void MyMISTracer::setScene(RenderContext* pRenderContext, const ref<Scene>& pSce
     {
         if (pScene->hasGeometryType(Scene::GeometryType::Custom))
         {
-            logWarning("MyMISTracer: This render pass does not support custom primitives.");
+            logWarning("MyReSTIRTracer: This render pass does not support custom primitives.");
         }
 
         // Create ray tracing program.
@@ -288,7 +297,7 @@ void MyMISTracer::setScene(RenderContext* pRenderContext, const ref<Scene>& pSce
     }
 }
 
-void MyMISTracer::prepareVars()
+void MyReSTIRTracer::prepareVars()
 {
     FALCOR_ASSERT(mpScene);
     FALCOR_ASSERT(mTracer.pProgram);
