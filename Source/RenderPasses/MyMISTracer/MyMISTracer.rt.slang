@@ -41,8 +41,10 @@ RWTexture2D<float4> gOutputColor;
 
 // Static configuration based on defines set from the host.
 #define is_valid(name) (is_valid_##name != 0)
-static const uint kMaxBounces = MAX_BOUNCES;
-static const uint kMISSamples = MIS_SAMPLES;
+static const uint kMaxBounces  = MAX_BOUNCES;
+static const uint kMISSamples  = MIS_NEE_SAMPLES + MIS_BSDF_SAMPLES;
+static const uint kNEESamples  = MIS_NEE_SAMPLES;
+static const uint kBSDFSamples = MIS_BSDF_SAMPLES;
 static const bool kComputeDirect = COMPUTE_DIRECT;
 static const bool kUseImportanceSampling = USE_IMPORTANCE_SAMPLING;
 static const bool kUseAnalyticLights = USE_ANALYTIC_LIGHTS;
@@ -263,16 +265,17 @@ float3 evalDirectAnalytic(const ShadingData sd, const IMaterialInstance mi, inou
  */
 struct Reservoir {
     float3 current_res;
-
     float sum_weight;
-    float current_weight;
 
     [mutating] void update(const float weight, const float3 res, inout SampleGenerator sg) {
+        if (weight < 1e-4)
+            return;
         this.sum_weight += weight;
         if (sampleNext1D(sg) < weight / sum_weight) {
             this.current_res = res;
-            this.current_weight = weight;
         }
+        // this.current_res *= 1  -  weight / sum_weight;
+        // this.current_res += weight * res / sum_weight;
     }
 };
 
@@ -320,7 +323,7 @@ struct Emissive {
 
 ParameterBlock<Emissive> gEmissive;
 
-void evalDirectMISEmissiveNEE(const ShadingData sd, const IMaterialInstance mi, inout SampleGenerator sg, inout Reservoir r, const float pNEE) {
+void evalDirectMISEmissiveNEE(const ShadingData sd, const IMaterialInstance mi, inout SampleGenerator sg, inout Reservoir r) {
     TriangleLightSample ls;
     if (!gEmissive.emissiveSampler.sampleLight(sd.posW, sd.faceN, true, sg, ls))
         return;
@@ -347,16 +350,16 @@ void evalDirectMISEmissiveNEE(const ShadingData sd, const IMaterialInstance mi, 
 
     const float3 res = mi.eval(sd, ls.dir, sg) * ls.Le;
     const float pdfNEE = gEmissive.emissiveSampler.evalPdf(sd.posW, sd.faceN, true, hit);
-    const float pdfBSDF = mi.evalPdf(sd, ls.dir, kUseImportanceSampling);
-    const float contribution = pdfNEE * rcp(kMISSamples * (pNEE * pdfNEE + (1.f-pNEE) * pdfBSDF));
-    const float weight = luminance(res) / pdfNEE * contribution;
     if (pdfNEE < 1e-4) {
         return;
     }
+    const float pdfBSDF = mi.evalPdf(sd, ls.dir, kUseImportanceSampling);
+    const float contribution = pdfNEE * rcp(kNEESamples * pdfNEE + kBSDFSamples * pdfBSDF);
+    const float weight = luminance(res) / pdfNEE * contribution;
     r.update(weight, res, sg);
 }
 
-void evalDirectMISEmissiveBSDF(const ShadingData sd, const IMaterialInstance mi, inout SampleGenerator sg, inout Reservoir r, const float pNEE) {
+void evalDirectMISEmissiveBSDF(const ShadingData sd, const IMaterialInstance mi, inout SampleGenerator sg, inout Reservoir r) {
     DirectRayData rayData;
     BSDFSample bsdfSample;
 
@@ -385,13 +388,16 @@ void evalDirectMISEmissiveBSDF(const ShadingData sd, const IMaterialInstance mi,
     const float pdfBSDF = bsdfSample.pdf;
 
     if (!isDelta) {
+        if (pdfBSDF < 1e-4) {
+            return;
+        }
         const float3 res = rayData.radiance * bsdfSample.weight * pdfBSDF;
-        const float contribution = pdfBSDF * rcp(kMISSamples * (pNEE * pdfNEE + (1.f - pNEE) * pdfBSDF));
+        const float contribution = pdfBSDF * rcp(kNEESamples * pdfNEE + kBSDFSamples * pdfBSDF);
         const float weight = luminance(res) * rcp(pdfBSDF) * contribution;
         r.update(weight, res, sg);
     } else {
         const float3 res = rayData.radiance * bsdfSample.weight;
-        const float contribution = rcp(kMISSamples * (1.f - pNEE));
+        const float contribution = rcp(kBSDFSamples);
         const float weight = luminance(res) * contribution;
         r.update(weight, res, sg);
     }
@@ -403,16 +409,14 @@ float3 evalDirectMIS(const ShadingData sd, const IMaterialInstance mi, inout Sam
     r.sum_weight  = 0.f;
     r.current_res = float3(0.f, 0.f, 0.f);
     float pNEE = 0.5f;
-    for (int i = 0; i < kMISSamples; i++) {
-        // if (sampleNext1D(sg) < 0.5f)
-        //     evalDirectMISAnalytic(sd, mi, sg, r);
-        // else
-        if(sampleNext1D(sg) <= pNEE)
-            evalDirectMISEmissiveNEE (sd, mi, sg, r, pNEE);
-        else
-            evalDirectMISEmissiveBSDF(sd, mi, sg, r, pNEE);
+    // TODO: no eval analytic for now
+    for (int i = 0; i < kNEESamples; i++) {        
+        evalDirectMISEmissiveNEE (sd, mi, sg, r);
     }
-    if (luminance(r.current_res) < 1e-6)
+    for (int i = 0; i < kBSDFSamples; i++) {
+        evalDirectMISEmissiveBSDF(sd, mi, sg, r);
+    }
+    if (luminance(r.current_res) < 1e-6) // for not to div 0
         return float3(0.f);
     float3 ans = r.sum_weight * r.current_res / luminance(r.current_res); //
     return ans;

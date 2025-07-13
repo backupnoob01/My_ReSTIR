@@ -68,13 +68,14 @@ private:
     // Configuration
 
     /// Max number of indirect bounces (0 = none).
-    uint mMaxBounces = 3;
+    uint mMaxBounces = 1;
     /// Compute direct illumination (otherwise indirect only).
     bool mComputeDirect = true;
     /// Use importance sampling for materials.
     bool mUseImportanceSampling = true;
     /// MIS samples.
-    uint mMISSamples = 16;
+    uint mNEESamples  = 16;
+    uint mBSDFSamples = 3;
 
     // Runtime data
 

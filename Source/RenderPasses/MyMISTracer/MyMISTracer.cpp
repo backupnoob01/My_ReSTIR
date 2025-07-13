@@ -125,7 +125,8 @@ void MyMISTracer::execute(RenderContext* pRenderContext, const RenderData& rende
     // Specialize program.
     // These defines should not modify the program vars. Do not trigger program vars re-creation.
     mTracer.pProgram->addDefine("MAX_BOUNCES", std::to_string(mMaxBounces));
-    mTracer.pProgram->addDefine("MIS_SAMPLES", std::to_string(mMISSamples));
+    mTracer.pProgram->addDefine("MIS_NEE_SAMPLES",  std::to_string(mNEESamples));
+    mTracer.pProgram->addDefine("MIS_BSDF_SAMPLES", std::to_string(mBSDFSamples));
     mTracer.pProgram->addDefine("COMPUTE_DIRECT", mComputeDirect ? "1" : "0");
     mTracer.pProgram->addDefine("USE_IMPORTANCE_SAMPLING", mUseImportanceSampling ? "1" : "0");
     mTracer.pProgram->addDefine("USE_ANALYTIC_LIGHTS", mpScene->useAnalyticLights() ? "1" : "0");
@@ -181,8 +182,11 @@ void MyMISTracer::renderUI(Gui::Widgets& widget)
     dirty |= widget.var("Max bounces", mMaxBounces, 0u, 1u << 16);
     widget.tooltip("Maximum path length for indirect illumination.\n0 = direct only\n1 = one indirect bounce etc.", true);
 
-    dirty |= widget.var("MIS Samples", mMISSamples, 0u, 1u << 16);
-    widget.tooltip("Numbers of MIS Samples.", true);
+    dirty |= widget.var("(MIS) NEE Samples", mNEESamples, 0u, 1u << 16);
+    widget.tooltip("Numbers of NEE Samples.", true);
+
+    dirty |= widget.var("(MIS) BSDF Samples", mBSDFSamples, 0u, 1u << 16);
+    widget.tooltip("Numbers of BSDF Samples.", true);
 
     dirty |= widget.checkbox("Evaluate direct illumination", mComputeDirect);
     widget.tooltip("Compute direct illumination.\nIf disabled only indirect is computed (when max bounces > 0).", true);
