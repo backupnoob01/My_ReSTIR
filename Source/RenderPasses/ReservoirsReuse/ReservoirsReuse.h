@@ -61,7 +61,6 @@ private:
     ref<ComputeState> mpState;
 
     uint mSpaceSamples = 5;
-    uint mTimeSamples  = 3;
 
     /// Current frame dimension in pixels.
     uint2 mFrameDim = {0, 0};
